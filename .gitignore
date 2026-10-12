@@ -1,0 +1,26 @@
+# ===== Keil MDK 编译生成文件 =====
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+*.o
+*.d
+*.crf
+*.htm
+*.map
+*.axf
+*.hex
+*.bin
+*.elf
+*.lnp
+
+# ===== Keil 工程临时配置 =====
+*.uvguix.*
+*.uvoptx
+*.bak
+*.dep
+
+# ===== STM32CubeMX 临时文件 =====
+*.ioc.bak
+
+# ===== 系统临时文件 =====
+*.log
+Thumbs.db
