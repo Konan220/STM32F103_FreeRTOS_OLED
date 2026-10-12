@@ -26,6 +26,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "OLED.h"
+#include "Key.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,7 +49,7 @@ osThreadId defaultTaskHandle;
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 void redTask(void const * argument);
-void greenTask(void const * argument);
+void keyTask(void const * argument);
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void const * argument);
@@ -101,9 +102,9 @@ void MX_FREERTOS_Init(void) {
   osThreadDef(redTask, redTask, osPriorityNormal, 0, 128);
   osThreadCreate(osThread(redTask), NULL);
 
-  /* 创建绿灯任务：亮300ms / 灭1500ms */
-  osThreadDef(greenTask, greenTask, osPriorityNormal, 0, 128);
-  osThreadCreate(osThread(greenTask), NULL);
+  /* 按键扫描任务 */
+  osThreadDef(keyTask, keyTask, osPriorityNormal, 0, 256);
+  osThreadCreate(osThread(keyTask), NULL);
   /* USER CODE END RTOS_THREADS */
 
 }
@@ -118,41 +119,16 @@ void MX_FREERTOS_Init(void) {
 void StartDefaultTask(void const * argument)
 {
   /* USER CODE BEGIN StartDefaultTask */
-  // 1. OLED 硬件初始化
-  OLED_Init();
-  
-  // 2. 清空显存
-  OLED_Clear();
-  
-  // 3. 显示测试内容（仅操作内存显存）
-  OLED_ShowString(0, 0, "STM32 OLED", OLED_8X16);  // 第0行：标题
-  OLED_ShowString(0, 2, "Year:", OLED_8X16);       // 第2行：标签
-  OLED_ShowNum(40, 2, 2026, 4, OLED_8X16);     // 第2行：数字
-  
-  OLED_DrawLine(0, 20, 127, 60); // 画一条斜线
-  OLED_DrawRectangle(100, 0, 27, 16, OLED_UNFILLED); // 画一个方框
-
-  // 4. 刷新显存到屏幕（必须调用！否则屏幕无显示）
-  OLED_Update();
-
-  // 任务主循环
   for(;;)
   {
-    // 屏幕整体反显，验证周期刷新正常
-    OLED_Reverse();
-    OLED_Update();
-    osDelay(1000);
-    
-    OLED_Reverse();
-    OLED_Update();
-    osDelay(1000);
+    // 空闲循环
   }
   /* USER CODE END StartDefaultTask */
 }
 
-
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
 /**
   * @brief  红灯任务：PA0输出，亮1000ms，灭1000ms
   */
@@ -168,17 +144,100 @@ void redTask(void const * argument)
 }
 
 /**
-  * @brief  绿灯任务：PA1输出，亮300ms，灭1500ms
+  * @brief  在OLED上显示带符号的数字，格式：+xxx / -xxx / 000
+  * @param  x, y: 显示起始坐标（左上角）
+  * @param  num: 要显示的数，范围 -200 ~ 200
+  * @note   手动拆位显示，不依赖 sprintf，避免嵌入式库格式化异常
+  *         每个字符宽 8 像素（OLED_8X16）
   */
-void greenTask(void const * argument)
+static void OLED_ShowSignedNumber(uint8_t x, uint8_t y, int16_t num)
 {
-  for(;;)
-  {
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_SET);   // 绿灯亮
-    osDelay(300);
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_1, GPIO_PIN_RESET); // 绿灯灭
-    osDelay(1500);
-  }
+    uint16_t abs_num;
+    char sign;
+
+    // 先清空 4 个字符位置（符号位+3位数字），防止残影
+    OLED_ShowString(x, y, "    ", OLED_8X16);
+
+    if (num > 0) {
+        sign = '+';
+        abs_num = (uint16_t)num;
+    } else if (num < 0) {
+        sign = '-';
+        abs_num = (uint16_t)(-num);
+    } else {
+        // 0 显示为 000（不带符号）
+        OLED_ShowChar(x,      y, '0', OLED_8X16);
+        OLED_ShowChar(x + 8,  y, '0', OLED_8X16);
+        OLED_ShowChar(x + 16, y, '0', OLED_8X16);
+        return;
+    }
+
+    // 显示符号位
+    OLED_ShowChar(x,      y, sign, OLED_8X16);
+    // 显示三位数字（百位 / 十位 / 个位）
+    OLED_ShowChar(x + 8,  y, '0' + (abs_num / 100) % 10, OLED_8X16);
+    OLED_ShowChar(x + 16, y, '0' + (abs_num / 10)  % 10, OLED_8X16);
+    OLED_ShowChar(x + 24, y, '0' + (abs_num)       % 10, OLED_8X16);
+}
+
+/**
+  * @brief  按键任务：扫描按键+OLED显示数值，KEY1加1，KEY2减1
+  * @note   数值范围 -200 ~ 200，显示格式：+xxx / -xxx / 000
+  */
+/**
+  * @brief  按键任务：接收中断事件 + OLED显示数值
+  * @note   数值范围 -200 ~ 200，显示格式：+xxx / -xxx / 000
+  */
+void keyTask(void const * argument)
+{
+    int16_t num = 0;     // 计数变量，范围 -200 ~ 200
+
+    Key_Init();          // 初始化按键消息队列
+    OLED_Init();         // 初始化OLED屏幕
+    OLED_Clear();        // 清屏
+
+    // 初始显示：第一行显示标签和数值 000
+    OLED_ShowString(0, 0, "Num:", OLED_8X16);
+    OLED_ShowSignedNumber(32, 0, num);
+    OLED_Update();       // 刷新到物理屏幕
+
+    for(;;)
+    {
+        /* 1. 阻塞等待按键中断投递的消息，不再轮询 */
+        KeyID key = Key_GetEvent(osWaitForever);
+        if (key == KEY_NUM) {
+            continue;    // 超时或无效事件
+        }
+
+        GPIO_TypeDef *port = (key == KEY_1) ? KEY1_PORT : KEY2_PORT;
+        uint16_t      pin  = (key == KEY_1) ? KEY1_PIN  : KEY2_PIN;
+
+        /* 2. 软件去抖：延时20ms后仍为低电平才确认有效按下 */
+        osDelay(20);
+        if (HAL_GPIO_ReadPin(port, pin) != GPIO_PIN_RESET) {
+            continue;    // 已经松开，是抖动，丢弃
+        }
+
+        /* 3. 处理按键逻辑 */
+        if (key == KEY_1) {
+            if (num < 200) {
+                num++;   // KEY1加1，上限200
+            }
+        } else if (key == KEY_2) {
+            if (num > -200) {
+                num--;   // KEY2减1，下限-200
+            }
+        }
+
+        /* 4. 更新OLED显示 */
+        OLED_ShowSignedNumber(32, 0, num);
+        OLED_Update();
+
+        /* 5. 等待按键释放，避免长按连续触发 */
+        while (HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET) {
+            osDelay(20);
+        }
+    }
 }
 /* USER CODE END Application */
 
